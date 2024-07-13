@@ -18,3 +18,80 @@ composer require uuf6429/phpdoc-to-jsonschema
 ```
 
 _Consider using `--dev` if you intend to use this library during development only._
+
+## 🚀 Usage
+
+The following code:
+```php
+namespace MyApp;
+
+// Define an example class to be featured in the json schema
+
+class Person
+{
+    public function __construct(
+        public readonly string $name,
+        public readonly int    $height,
+    ) {
+    }
+}
+
+// Load a PHPDoc block that should return an instance of the Person class
+$docblock = \phpDocumentor\Reflection\DocBlockFactory::createInstance()->create('/** @return Person */');
+
+// Retrieve the @return tag for that docblock.
+$returnTag = $docblock->getTagsWithTypeByName('return')[0];
+
+// Convert that @return tag to JSON Schema
+// (note that convertTag() takes typed tags, for example: @param, @var, @property[-read/-write] and of course @return)
+$converter = new \uuf6429\PHPDocToJSONSchema\Converter();
+$result = $converter->convertTag($returnTag, null);
+
+// Export the schema and print it out as json
+echo json_encode(\Swaggest\JsonSchema\Schema::export($result), JSON_PRETTY_PRINT);
+```
+...results in something like:
+```json
+{
+    "$ref": "#\/definitions\/MyApp.Person",
+    "definitions": {
+        "MyApp.Person": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "readOnly": true
+                },
+                "height": {
+                    "type": "integer",
+                    "readOnly": true
+                }
+            },
+            "required": [
+                "name",
+                "height"
+            ]
+        }
+    }
+}
+```
+
+See also [`ExampleTest`](https://github.com/uuf6429/phpdoc-to-jsonschema/blob/main/tests/Unit/ExampleTest.php) for a more complex example.
+
+## 📖 Documentation
+
+The `\uuf6429\PHPDocToJSONSchema\Converter` class exposes the following methods:
+
+- ```php
+  convertTag(\phpDocumentor\Reflection\DocBlock\Tags\TagWithType $tag, ?string $currentClass): \Swaggest\JsonSchema\Schema
+  ```
+  Converts the PHPDoc Type of the passed `$tag` and returns its schema.
+  - `$tag` The tag whose type will be converted.
+  - `$currentClass` The fully-qualified class name of the class where this tag appeared, or null if wasn't a class (e.g. for functions).
+
+- ```php
+  convertType(\phpDocumentor\Reflection\Type $type, ?string $currentClass): \Swaggest\JsonSchema\Schema`
+  ```
+  Converts the provided PHPDoc type and returns its schema.
+    - `$type` The PHPDoc type to be converted.
+    - `$currentClass` The fully-qualified class name of the class where that type appeared, or null if wasn't a class (e.g. for functions).
