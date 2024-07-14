@@ -4,7 +4,7 @@ namespace uuf6429\PHPDocToJSONSchemaTests\Unit;
 
 use Exception;
 use LogicException;
-use phpDocumentor\Reflection\DocBlockFactory;
+use PHPStan\PhpDocParser\Ast\PhpDoc\ReturnTagValueNode;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
@@ -12,6 +12,7 @@ use Swaggest\JsonSchema\Schema;
 use Throwable;
 use uuf6429\PHPDocToJSONSchema\Converter;
 use uuf6429\PHPDocToJSONSchemaTests\Fixtures\EmptyClass;
+use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc;
 
 class ConverterTest extends TestCase
 {
@@ -23,11 +24,12 @@ class ConverterTest extends TestCase
     #[DataProvider('validConversionsDataProvider')]
     public function testThatValidConversionsWork(string $phpdocComment, array $expectedResult, ?string $currentClass = null): void
     {
-        $docblock = DocBlockFactory::createInstance()->create($phpdocComment);
         $converter = new Converter();
-        $returnTag = $docblock->getTagsWithTypeByName('return')[0];
+        $docblock = PhpDoc\Factory::createInstance()->createFromComment($phpdocComment);
+        /** @var ReturnTagValueNode $returnTag */
+        $returnTag = $docblock->getTag('@return');
 
-        $result = $converter->convertTag($returnTag, $currentClass);
+        $result = $converter->convertType($returnTag->type, $currentClass);
 
         $this->assertEquals((object)$expectedResult, Schema::export($result));
     }
@@ -553,14 +555,15 @@ class ConverterTest extends TestCase
     #[DataProvider('invalidConversionsDataProvider')]
     public function testThatInvalidConversionsFail(string $phpdocComment, Exception $expectedException): void
     {
-        $docblock = DocBlockFactory::createInstance()->create($phpdocComment);
         $converter = new Converter();
-        $returnTag = $docblock->getTagsWithTypeByName('return')[0];
+        $docblock = PhpDoc\Factory::createInstance()->createFromComment($phpdocComment);
+        /** @var ReturnTagValueNode $returnTag */
+        $returnTag = $docblock->getTag('@return');
 
         $this->expectException(get_class($expectedException));
         $this->expectExceptionMessage($expectedException->getMessage());
 
-        $converter->convertTag($returnTag, null);
+        $converter->convertType($returnTag->type, null);
     }
 
     /**

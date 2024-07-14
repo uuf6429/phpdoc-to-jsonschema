@@ -2,25 +2,25 @@
 
 namespace uuf6429\PHPDocToJSONSchemaTests\Unit;
 
-use phpDocumentor\Reflection\DocBlockFactory;
-use phpDocumentor\Reflection\Types\Context;
+use PHPStan\PhpDocParser\Ast\PhpDoc\ReturnTagValueNode;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 use Swaggest\JsonSchema\Schema;
 use uuf6429\PHPDocToJSONSchema\Converter;
 use uuf6429\PHPDocToJSONSchemaTests\Fixtures\Example\GetPersonEndpoint;
+use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc;
 
 class ExampleTest extends TestCase
 {
     public function testThatExampleWorks(): void
     {
-        $endpointMethod = new ReflectionMethod(GetPersonEndpoint::class, '__invoke');
-        $endpointDocblock = DocBlockFactory::createInstance()
-            ->create($endpointMethod, new Context($endpointMethod->getDeclaringClass()->getNamespaceName()));
-        $endpointReturnDocblockTag = $endpointDocblock->getTagsWithTypeByName('return')[0];
-
         $converter = new Converter();
-        $result = $converter->convertTag($endpointReturnDocblockTag, GetPersonEndpoint::class);
+        $endpointMethod = new ReflectionMethod(GetPersonEndpoint::class, '__invoke');
+        $docblock = PhpDoc\Factory::createInstance()->createFromReflector($endpointMethod);
+        /** @var ReturnTagValueNode $endpointReturnDocblockTag */
+        $endpointReturnDocblockTag = $docblock->getTag('@return');
+
+        $result = $converter->convertType($endpointReturnDocblockTag->type, GetPersonEndpoint::class);
 
         $this->assertEquals(
             (object)[

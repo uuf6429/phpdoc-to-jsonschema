@@ -11,8 +11,8 @@
     ],
     "require": {
         "php": "^8.1",
-        "phpdocumentor/reflection-docblock": "^5.4",
-        "swaggest/json-schema": "^0.12.42"
+        "swaggest/json-schema": "^0.12.42",
+        "uuf6429/phpstan-phpdoc-type-resolver": "^1.1.0"
     },
     "require-dev": {
         "ergebnis/composer-normalize": "^2.42",

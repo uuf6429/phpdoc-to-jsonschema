@@ -6,7 +6,7 @@ use ArrayObject;
 use Exception;
 use InvalidArgumentException;
 use LogicException;
-use phpDocumentor\Reflection;
+use PHPStan\PhpDocParser;
 use ReflectionClass;
 use ReflectionEnum;
 use ReflectionEnumBackedCase;
@@ -18,6 +18,8 @@ use ReflectionUnionType;
 use RuntimeException;
 use Swaggest\JsonSchema;
 use Throwable;
+use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc\Block;
+use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc\Factory;
 
 class Converter
 {
@@ -49,19 +51,9 @@ class Converter
     ];
 
     /**
-     * A map from virtual types, to JsonSchema types.
-     */
-    private const VIRTUAL_TYPE_MAP = [
-        Reflection\Types\Null_::class => 'null',
-        Reflection\Types\Integer::class => 'integer',
-        Reflection\Types\Float_::class => 'number',
-        Reflection\Types\Boolean::class => 'boolean',
-        Reflection\Types\String_::class => 'string',
-    ];
-
-    /**
      * @param class-string|null $currentClass Fully-qualified class name of where the type occurred, when applicable.
      * @throws Throwable
+     * @deprecated This will not work nicely anymore since there is no supertype tag defining $type property.
      */
     public function convertTag(Reflection\DocBlock\Tags\TagWithType $tag, ?string $currentClass): JsonSchema\Schema
     {
@@ -85,7 +77,7 @@ class Converter
      * @param class-string|null $currentClass Fully-qualified class name of where the type occurred, when applicable.
      * @throws Throwable
      */
-    public function convertType(Reflection\Type $type, ?string $currentClass): JsonSchema\Schema
+    public function convertType(PhpDocParser\Ast\Type\TypeNode $type, ?string $currentClass): JsonSchema\Schema
     {
         $definitions = new ArrayObject();
 
@@ -103,35 +95,12 @@ class Converter
     }
 
     /**
-     * @param null|class-string $currentClass
-     * @param ArrayObject<string, JsonSchema\Schema> $definitions
-     * @throws Throwable
-     */
-    public function doConvertTag(Reflection\DocBlock\Tags\TagWithType $tag, ?string $currentClass, ArrayObject $definitions): JsonSchema\Schema
-    {
-        $type = $tag->getType() ?? throw new InvalidArgumentException('Tag does not have a type');
-
-        $result = $this->convertVirtualType($type, $currentClass, [], $definitions);
-        $this->applyTitleAndDescription($result, (string)($tag->getDescription() ?? ''));
-
-        if ($tag->getName() === 'property-read') {
-            $result->offsetSet('readOnly', true);
-        }
-
-        if ($tag->getName() === 'property-write') {
-            $result->offsetSet('writeOnly', true);
-        }
-
-        return $result;
-    }
-
-    /**
      * @param class-string|null $currentClass
      * @param array<string, mixed> $options
      * @param ArrayObject<string, JsonSchema\Schema> $definitions
      * @throws Throwable
      */
-    private function convertVirtualType(Reflection\Type $type, ?string $currentClass, array $options, ArrayObject $definitions): JsonSchema\Schema
+    private function convertVirtualType(PhpDocParser\Ast\Type\TypeNode $type, ?string $currentClass, array $options, ArrayObject $definitions): JsonSchema\Schema
     {
         switch (true) {
             // We don't care about the following interfaces; they're already handled:
@@ -411,13 +380,15 @@ class Converter
     /**
      * @return null|list<string>
      */
-    private function tryGettingScalarTypesVirtual(Reflection\Types\Compound $type): null|array
+    private function tryGettingScalarTypesVirtual(PhpDocParser\Ast\Type\IntersectionTypeNode $type): null|array
     {
         $result = [];
 
-        /** @var Reflection\Type $subType */
-        foreach ($type as $subType) {
-            if (($jsType = self::VIRTUAL_TYPE_MAP[get_class($subType)] ?? null) === null) {
+        foreach ($type->types as $subType) {
+            if (!$subType instanceof ReflectionNamedType) {
+                return null;
+            }
+            if (($jsType = self::NATIVE_TYPE_MAP[$subType->getName()] ?? null) === null) {
                 return null;
             }
             $result[] = $jsType;
@@ -480,7 +451,7 @@ class Converter
      */
     protected function convertClassLike(ReflectionClass $reflector, ArrayObject $definitions): JsonSchema\Schema
     {
-        $docBlock = Reflection\DocBlockFactory::createInstance()->create(trim($reflector->getDocComment() ?: '') ?: "/**\n*/");
+        $docBlock = Factory::createInstance()->createFromReflector($reflector);
         if (!$reflector instanceof ReflectionEnum && $reflector->isEnum()) {
             /**
              * @phpstan-ignore-next-line
@@ -506,7 +477,7 @@ class Converter
      * @param ArrayObject<string, JsonSchema\Schema> $definitions
      * @throws Throwable
      */
-    protected function convertClass(ReflectionClass $reflector, Reflection\DocBlock $docBlock, ArrayObject $definitions): JsonSchema\Schema
+    protected function convertClass(ReflectionClass $reflector, Block $docBlock, ArrayObject $definitions): JsonSchema\Schema
     {
         $schema = $this->createSchema([
             'type' => 'object',
@@ -523,17 +494,27 @@ class Converter
             $schema->required[] = $property->getName();
         }
 
-        /** @var (Reflection\DocBlock\Tags\Property|Reflection\DocBlock\Tags\PropertyRead)[] $virtualProperties */
-        $virtualProperties = array_merge(
-            $docBlock->getTagsByName('property'),
-            $docBlock->getTagsByName('property-read'),
-            $docBlock->getTagsByName('property-write'),
-        );
-        foreach ($virtualProperties as $property) {
-            if (!($propertyName = trim($property->getVariableName() ?: ''))) {
-                throw new LogicException("Magic property in class `$reflector->name` must have a valid name");
+        /** @var list<array{props: list<PhpDocParser\Ast\PhpDoc\PropertyTagValueNode>, opts: array<string, mixed>}> $virtualProperties */
+        $virtualProperties = [
+            [
+                'props' => $docBlock->getTags('@property'),
+                'opts' => [],
+            ],
+            [
+                'props' => $docBlock->getTags('@property-read'),
+                'opts' => ['readOnly' => true],
+            ],
+            [
+                'props' => $docBlock->getTags('@property-write'),
+                'opts' => ['writeOnly' => true],
+            ],
+        ];
+        foreach ($virtualProperties as $propertySet) {
+            foreach ($propertySet['props'] as $property) {
+                $schema = $this->convertVirtualType($property->type, $reflector->name, $propertySet['opts'], $definitions);
+                $this->applyTitleAndDescription($schema, $property->description);
+                $schema->setProperty($property->propertyName, $schema);
             }
-            $schema->setProperty($propertyName, $this->convertVirtualProperty($property, $reflector->name, $definitions));
         }
 
         $schema->required = array_unique($schema->required);
@@ -562,33 +543,21 @@ class Converter
     }
 
     /**
-     * @param class-string $declaringClass
-     * @param ArrayObject<string, JsonSchema\Schema> $definitions
-     * @throws Throwable
-     */
-    private function convertVirtualProperty(
-        Reflection\DocBlock\Tags\Property|Reflection\DocBlock\Tags\PropertyRead $property,
-        string                                                                  $declaringClass,
-        ArrayObject                                                             $definitions,
-    ): JsonSchema\Schema {
-        return $this->doConvertTag($property, $declaringClass, $definitions);
-    }
-
-    /**
      * @param ArrayObject<string, JsonSchema\Schema> $definitions
      * @throws Throwable
      */
     private function convertNativeProperty(ReflectionProperty $property, ArrayObject $definitions): JsonSchema\Schema
     {
-        $docBlock = Reflection\DocBlockFactory::createInstance()->create(trim($property->getDocComment() ?: '') ?: "/**\n*/");
+        $docBlock = Factory::createInstance()->createFromReflector($property);
 
-        $varTag = $docBlock->getTagsWithTypeByName('var')[0] ?? null;
+        /** @var null|PhpDocParser\Ast\PhpDoc\VarTagValueNode $varTag */
+        $varTag = $docBlock->findTag('@var');
         if ($varTag) {
             /**
              * @see https://github.com/phpstan/phpstan/issues/11334
              * @phpstan-ignore-next-line
              */
-            $schema = $this->doConvertTag($varTag, $property->class, $definitions);
+            $schema = $this->convertVirtualType($varTag->type, $property->class, [], $definitions);
         } else {
             /**
              * @see https://github.com/phpstan/phpstan/issues/11334
@@ -605,11 +574,11 @@ class Converter
             $schema->description = $summary;
         }
 
-        if ($docBlock->hasTag('deprecated')) {
+        if ($docBlock->hasTag('@deprecated')) {
             $schema->offsetSet('deprecated', true);
         }
 
-        if ($docBlock->hasTag('readonly') || $property->isReadOnly()) {
+        if ($docBlock->hasTag('@readonly') || $property->isReadOnly()) {
             $schema->offsetSet('readOnly', true);
         }
 
