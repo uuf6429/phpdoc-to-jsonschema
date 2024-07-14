@@ -271,6 +271,9 @@ class Converter
 
             case $type instanceof Reflection\Types\Object_:
                 $targetClass = (string)$type->getFqsen();
+                if ($targetClass === '') {
+                    return $this->createSchema(['type' => 'object', 'additionalProperties' => true]);
+                }
                 class_exists($targetClass) or throw new RuntimeException("Could not find class `$targetClass`");
                 return $this->createSchema(['$ref' => $this->getRegisteredDefinitionRef($targetClass, $definitions), ...$options]);
 
