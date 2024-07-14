@@ -53,29 +53,6 @@ class Converter
     /**
      * @param class-string|null $currentClass Fully-qualified class name of where the type occurred, when applicable.
      * @throws Throwable
-     * @deprecated This will not work nicely anymore since there is no supertype tag defining $type property.
-     */
-    public function convertTag(Reflection\DocBlock\Tags\TagWithType $tag, ?string $currentClass): JsonSchema\Schema
-    {
-        $type = $tag->getType() ?? throw new InvalidArgumentException('Tag does not have a type');
-
-        $result = $this->convertType($type, $currentClass);
-        $this->applyTitleAndDescription($result, (string)($tag->getDescription() ?? ''));
-
-        if ($tag->getName() === 'property-read') {
-            $result->offsetSet('readOnly', true);
-        }
-
-        if ($tag->getName() === 'property-write') {
-            $result->offsetSet('writeOnly', true);
-        }
-
-        return $result;
-    }
-
-    /**
-     * @param class-string|null $currentClass Fully-qualified class name of where the type occurred, when applicable.
-     * @throws Throwable
      */
     public function convertType(PhpDocParser\Ast\Type\TypeNode $type, ?string $currentClass): JsonSchema\Schema
     {
