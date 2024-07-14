@@ -80,17 +80,17 @@ See also [`ExampleTest`](https://github.com/uuf6429/phpdoc-to-jsonschema/blob/ma
 
 ## 📖 Documentation
 
-The `\uuf6429\PHPDocToJSONSchema\Converter` class exposes the following methods:
+The `\uuf6429\PHPDocToJSONSchema\Converter` class exposes the following:
 
 - ```php
-  convertTag(\phpDocumentor\Reflection\DocBlock\Tags\TagWithType $tag, ?string $currentClass): \Swaggest\JsonSchema\Schema
+  function convertTag(\phpDocumentor\Reflection\DocBlock\Tags\TagWithType $tag, ?string $currentClass): \Swaggest\JsonSchema\Schema
   ```
   Converts the PHPDoc Type of the passed `$tag` and returns its schema.
   - `$tag` The tag whose type will be converted.
   - `$currentClass` The fully-qualified class name of the class where this tag appeared, or null if wasn't a class (e.g. for functions).
 
 - ```php
-  convertType(\phpDocumentor\Reflection\Type $type, ?string $currentClass): \Swaggest\JsonSchema\Schema`
+  function convertType(\phpDocumentor\Reflection\Type $type, ?string $currentClass): \Swaggest\JsonSchema\Schema
   ```
   Converts the provided PHPDoc type and returns its schema.
     - `$type` The PHPDoc type to be converted.
