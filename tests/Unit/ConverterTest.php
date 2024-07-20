@@ -25,7 +25,7 @@ class ConverterTest extends TestCase
     public function testThatValidConversionsWork(string $phpdocComment, array $expectedResult, ?string $currentClass = null): void
     {
         $converter = new Converter();
-        $docblock = PhpDoc\Factory::createInstance()->createFromComment($phpdocComment);
+        $docblock = PhpDoc\Factory::createInstance()->createFromComment($phpdocComment, class: EmptyClass::class);
         /** @var ReturnTagValueNode $returnTag */
         $returnTag = $docblock->getTag('@return');
 
@@ -50,7 +50,7 @@ class ConverterTest extends TestCase
             ],
         ];
 
-        yield 'string value' => [
+        yield 'string literal' => [
             'phpdocComment' => <<<'PHP'
                 /**
                  * @return 'test'
@@ -137,30 +137,26 @@ class ConverterTest extends TestCase
             ],
         ];
 
-        yield 'object of integers' => [
+        yield 'object shape' => [
             'phpdocComment' => <<<'PHP'
-               /**
-                * @return object<int>
-                */
-               PHP,
+                      /**
+                       * @return object{'aa': string, bb?: bool, cc: int|float}
+                       */
+                      PHP,
             'expectedResult' => [
                 'type' => 'object',
-                'additionalProperties' => (object)[
-                    'type' => 'integer',
+                'properties' => (object)[
+                    'aa' => (object)['type' => 'string'],
+                    'bb' => (object)['type' => 'boolean'],
+                    'cc' => (object)['type' => ['integer', 'number']],
                 ],
+                'required' => [
+                    'aa',
+                    'cc',
+                ],
+                'additionalProperties' => true,
             ],
         ];
-
-        //        yield 'object shape' => [
-        //            'phpdocComment' => <<<'PHP'
-        //                /**
-        //                 * @return object{aa: string, bb: int}
-        //                 */
-        //                PHP,
-        //            'expectedResult' => [
-        //                'type' => ['string', 'integer', 'number', 'boolean'],
-        //            ],
-        //        ];
 
         yield 'false or integer' => [
             'phpdocComment' => <<<'PHP'
@@ -556,7 +552,7 @@ class ConverterTest extends TestCase
     public function testThatInvalidConversionsFail(string $phpdocComment, Exception $expectedException): void
     {
         $converter = new Converter();
-        $docblock = PhpDoc\Factory::createInstance()->createFromComment($phpdocComment);
+        $docblock = PhpDoc\Factory::createInstance()->createFromComment($phpdocComment, class: EmptyClass::class);
         /** @var ReturnTagValueNode $returnTag */
         $returnTag = $docblock->getTag('@return');
 
@@ -571,15 +567,6 @@ class ConverterTest extends TestCase
      */
     public static function invalidConversionsDataProvider(): iterable
     {
-        yield 'self cannot be resolved without a current class' => [
-            'phpdocComment' => <<<'PHP'
-                /**
-                 * @return self
-                 */
-                PHP,
-            'expectedException' => new LogicException('Cannot convert `$this` type when `$currentClass` is empty'),
-        ];
-
         yield '"void" cannot be converted' => [
             'phpdocComment' => <<<'PHP'
                 /**
@@ -604,16 +591,25 @@ class ConverterTest extends TestCase
                  * @return resource
                  */
                 PHP,
-            'expectedException' => new LogicException('Resources cannot be converted to JSON Schema'),
+            'expectedException' => new LogicException('`resource` cannot be converted to JSON Schema'),
         ];
 
-        yield 'callable cannot be converted' => [
+        yield 'simple callable cannot be converted' => [
             'phpdocComment' => <<<'PHP'
                 /**
                  * @return callable
                  */
                 PHP,
-            'expectedException' => new LogicException('Callable cannot be converted to JSON Schema'),
+            'expectedException' => new LogicException('`callable` cannot be converted to JSON Schema'),
+        ];
+
+        yield 'complex callable cannot be converted' => [
+            'phpdocComment' => <<<'PHP'
+                /**
+                 * @return callable(int): string
+                 */
+                PHP,
+            'expectedException' => new LogicException('`callable` cannot be converted to JSON Schema'),
         ];
 
         yield 'non-backed enum cannot be converted' => [
@@ -631,7 +627,16 @@ class ConverterTest extends TestCase
                  * @return missing
                  */
                 PHP,
-            'expectedException' => new RuntimeException('Could not find class `\missing`'),
+            'expectedException' => new RuntimeException('`missing` cannot be converted to JSON Schema'),
+        ];
+
+        yield 'generic object cannot be converted' => [
+            'phpdocComment' => <<<'PHP'
+               /**
+                * @return object<int>
+                */
+               PHP,
+            'expectedException' => new LogicException('`object«int»` cannot be converted to JSON Schema'),
         ];
     }
 }
