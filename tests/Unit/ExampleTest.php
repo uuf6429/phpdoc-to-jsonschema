@@ -19,6 +19,7 @@ class ExampleTest extends TestCase
         $docblock = PhpDoc\Factory::createInstance()->createFromReflector($endpointMethod);
         /** @var ReturnTagValueNode $endpointReturnDocblockTag */
         $endpointReturnDocblockTag = $docblock->getTag('@return');
+        $generics = $docblock->getGenericsResolver();
 
         $result = $converter->convertType($endpointReturnDocblockTag->type, GetPersonEndpoint::class);
 
@@ -26,11 +27,12 @@ class ExampleTest extends TestCase
             (object)[
                 '$ref' => '#/definitions/uuf6429.PHPDocToJSONSchemaTests.Fixtures.Example.Response<uuf6429.PHPDocToJSONSchemaTests.Fixtures.Example.Person>',
                 'definitions' => (object)[
-                    '#/definitions/uuf6429.PHPDocToJSONSchemaTests.Fixtures.Example.Response<uuf6429.PHPDocToJSONSchemaTests.Fixtures.Example.Person>' => (object)[
+                    'uuf6429.PHPDocToJSONSchemaTests.Fixtures.Example.Response<uuf6429.PHPDocToJSONSchemaTests.Fixtures.Example.Person>' => (object)[
                         'type' => 'object',
                         'properties' => (object)[
                             'data' => (object)[
                                 '$ref' => '#/definitions/uuf6429.PHPDocToJSONSchemaTests.Fixtures.Example.Person',
+                                'readOnly' => true,
                             ],
                         ],
                         'required' => ['data'],

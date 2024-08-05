@@ -636,7 +636,7 @@ class ConverterTest extends TestCase
                 * @return object<int>
                 */
                PHP,
-            'expectedException' => new LogicException('`object«int»` cannot be converted to JSON Schema'),
+            'expectedException' => new LogicException('`object<int>` cannot be converted to JSON Schema'),
         ];
     }
 }

@@ -18,6 +18,8 @@ use Swaggest\JsonSchema;
 use Throwable;
 use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc\Block;
 use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc\Factory;
+use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc\Types\ConcreteGenericTypeNode;
+use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc\Types\TemplateTypeNode;
 
 class Converter
 {
@@ -57,13 +59,14 @@ class Converter
 
     /**
      * @param class-string|null $currentClass Fully-qualified class name of where the type occurred, when applicable.
+     * @param array<string, string> $genericTypesMap A mapping of <template type> => <concrete type> pairs, for use when `$type` is or contains generic templates.
      * @throws Throwable
      */
-    public function convertType(PhpDocParser\Ast\Type\TypeNode $type, ?string $currentClass): JsonSchema\Schema
+    public function convertType(PhpDocParser\Ast\Type\TypeNode $type, ?string $currentClass, array $genericTypesMap = []): JsonSchema\Schema
     {
         $definitions = new Definitions();
 
-        $result = $this->convertVirtualType($type, $currentClass, [], $definitions);
+        $result = $this->convertVirtualType($type, $currentClass, [], $definitions, $genericTypesMap);
 
         if (!$definitions->isComplete()) {
             throw new RuntimeException('Definitions have not been built successfully');
@@ -79,13 +82,27 @@ class Converter
     /**
      * @param null|class-string $currentClass
      * @param array<string, mixed> $options
+     * @param array<string, string> $genericTypesMap
      * @throws Throwable
      */
-    private function convertVirtualType(PhpDocParser\Ast\Type\TypeNode $type, ?string $currentClass, array $options, Definitions $definitions): JsonSchema\Schema
+    private function convertVirtualType(PhpDocParser\Ast\Type\TypeNode $type, ?string $currentClass, array $options, Definitions $definitions, array $genericTypesMap): JsonSchema\Schema
     {
         $constExpr = $type instanceof PhpDocParser\Ast\Type\ConstTypeNode ? $type->constExpr : null;
 
         return match (true) {
+            $type instanceof TemplateTypeNode
+            => $this->convertVirtualType(
+                type: new PhpDocParser\Ast\Type\IdentifierTypeNode(
+                    $genericTypesMap[$type->name]
+                    ?? $type->bound?->name
+                    ?? throw new RuntimeException('Template Type node should point to a valid template type (defined with an "@template" tag) or at least a valid lower bound (e.g. "T of bound")')
+                ),
+                currentClass: $currentClass,
+                options: [],
+                definitions: $definitions,
+                genericTypesMap: $genericTypesMap,
+            ),
+
             $type instanceof PhpDocParser\Ast\Type\InvalidTypeNode
             => throw new LogicException('Invalid node cannot be converted to JSON Schema', 0, $type->getException()),
 
@@ -96,7 +113,7 @@ class Converter
                     array_map(strval(...), array_column($type->items, 'keyName')),
                     array_map(
                         fn(PhpDocParser\Ast\Type\ObjectShapeItemNode $item) => JsonSchema\Schema::export(
-                            $this->convertVirtualType($item->valueType, $currentClass, [], $definitions),
+                            $this->convertVirtualType($item->valueType, $currentClass, [], $definitions, $genericTypesMap),
                         ),
                         $type->items,
                     ),
@@ -136,7 +153,7 @@ class Converter
             => $this->createSchema([
                 'allOf' => array_map(
                     fn(PhpDocParser\Ast\Type\TypeNode $subType) => JsonSchema\Schema::export(
-                        $this->convertVirtualType($subType, $currentClass, [], $definitions),
+                        $this->convertVirtualType($subType, $currentClass, [], $definitions, $genericTypesMap),
                     ),
                     $type->types,
                 ),
@@ -156,6 +173,9 @@ class Converter
 
                 $type->name === 'mixed'
                 => $this->createSchema([]),
+
+                $type->name === 'object'
+                => $this->createSchema(['type' => 'object', 'additionalProperties' => true]),
 
                 $type->name === 'true'
                 => $this->createSchema(['const' => true]),
@@ -179,7 +199,7 @@ class Converter
             },
 
             $type instanceof PhpDocParser\Ast\Type\NullableTypeNode
-            => $this->makeSchemaNullable($this->convertVirtualType($type->type, $currentClass, $options, $definitions)),
+            => $this->makeSchemaNullable($this->convertVirtualType($type->type, $currentClass, $options, $definitions, $genericTypesMap)),
 
             $type instanceof PhpDocParser\Ast\Type\ConstTypeNode
             => match (true) {
@@ -241,12 +261,15 @@ class Converter
                 : $this->createSchema([
                     'anyOf' => array_map(
                         fn(PhpDocParser\Ast\Type\TypeNode $subType) => JsonSchema\Schema::export(
-                            $this->convertVirtualType($subType, $currentClass, [], $definitions),
+                            $this->convertVirtualType($subType, $currentClass, [], $definitions, $genericTypesMap),
                         ),
                         $type->types,
                     ),
                     ...$options,
                 ]),
+
+            default
+            => throw new RuntimeException('Unsupported type `' . get_debug_type($type) . '` cannot be converted to JSON Schema'),
         };
     }
 
@@ -413,6 +436,7 @@ class Converter
                         ? $class
                         : throw new LogicException("`$classKey` cannot be converted to JSON Schema"),
                 ),
+                [],
                 $definitions,
             ),
         );
@@ -425,6 +449,10 @@ class Converter
      */
     private function getRegisteredGenericDefinitionRef(PhpDocParser\Ast\Type\GenericTypeNode $type, Definitions $definitions): string
     {
+        if (!$type instanceof ConcreteGenericTypeNode) {
+            throw new RuntimeException("Incomplete/unresolved generic type cannot be converted to JSON Schema: $type");
+        }
+
         $classKey = str_replace('\\', '.', $this->generateGenericClassName($type));
         $definitions->defineIfNotDefined(
             $classKey,
@@ -433,6 +461,24 @@ class Converter
                     class_exists($class = $type->type->name)
                         ? $class
                         : throw new LogicException("`$classKey` cannot be converted to JSON Schema"),
+                ),
+                array_combine(
+                    array_map(
+                        static fn(?object $node) => match (get_class($node)) {
+                            TemplateTypeNode::class => $node->name,
+                            PhpDocParser\Ast\Type\IdentifierTypeNode::class => $node->name,
+                            default => throw new RuntimeException("Template Type `" . get_debug_type($node) . "` is not supported: $node"),
+                        },
+                        $type->templateTypes,
+                    ),
+                    array_map(
+                        static fn(?object $node) => match (get_class($node)) {
+                            TemplateTypeNode::class => $node->name,
+                            PhpDocParser\Ast\Type\IdentifierTypeNode::class => $node->name,
+                            default => throw new RuntimeException("Concrete Type `" . get_debug_type($node) . "` is not supported: $node"),
+                        },
+                        $type->genericTypes,
+                    ),
                 ),
                 $definitions,
             ),
@@ -444,10 +490,10 @@ class Converter
     private function generateGenericClassName(PhpDocParser\Ast\Type\GenericTypeNode $type): string
     {
         return sprintf(
-            '%s«%s»',
+            '%s<%s>',
             ltrim($type->type->name, '\\'),
             implode(
-                '❟',
+                ',',
                 array_map(
                     static fn(PhpDocParser\Ast\Type\TypeNode $subType) => $subType instanceof PhpDocParser\Ast\Type\IdentifierTypeNode
                         ? ltrim($subType->name, '\\')
@@ -460,9 +506,10 @@ class Converter
 
     /**
      * @param ReflectionClass<object> $reflector
+     * @param array<string, string> $genericTypesMap
      * @throws Throwable
      */
-    protected function convertClassLike(ReflectionClass $reflector, Definitions $definitions): JsonSchema\Schema
+    protected function convertClassLike(ReflectionClass $reflector, array $genericTypesMap, Definitions $definitions): JsonSchema\Schema
     {
         $docBlock = Factory::createInstance()->createFromReflector($reflector);
         if (!$reflector instanceof ReflectionEnum && $reflector->isEnum()) {
@@ -471,7 +518,7 @@ class Converter
 
         $schema = $reflector instanceof ReflectionEnum
             ? $this->convertEnum($reflector)
-            : $this->convertClass($reflector, $docBlock, $definitions);
+            : $this->convertClass($reflector, $docBlock, $genericTypesMap, $definitions);
 
         $this->applyTitleAndDescription($schema, rtrim("{$docBlock->getSummary()}\n\n{$docBlock->getDescription()}"));
 
@@ -484,9 +531,10 @@ class Converter
 
     /**
      * @param ReflectionClass<object> $reflector
+     * @param array<string, string> $genericTypesMap
      * @throws Throwable
      */
-    protected function convertClass(ReflectionClass $reflector, Block $docBlock, Definitions $definitions): JsonSchema\Schema
+    protected function convertClass(ReflectionClass $reflector, Block $docBlock, array $genericTypesMap, Definitions $definitions): JsonSchema\Schema
     {
         $schema = $this->createSchema([
             'type' => 'object',
@@ -499,7 +547,7 @@ class Converter
 
         $nativeProperties = $reflector->getProperties(ReflectionProperty::IS_PUBLIC);
         foreach ($nativeProperties as $property) {
-            $schema->setProperty($property->getName(), $this->convertNativeProperty($property, $definitions));
+            $schema->setProperty($property->getName(), $this->convertNativeProperty($property, $genericTypesMap, $definitions));
             $schema->required[] = $property->getName();
         }
 
@@ -520,7 +568,7 @@ class Converter
         ];
         foreach ($virtualProperties as $propertySet) {
             foreach ($propertySet['props'] as $property) {
-                $propertySchema = $this->convertVirtualType($property->type, $reflector->name, $propertySet['attrs'], $definitions);
+                $propertySchema = $this->convertVirtualType($property->type, $reflector->name, $propertySet['attrs'], $definitions, $genericTypesMap);
                 foreach ($propertySet['attrs'] as $key => $val) {
                     $propertySchema->offsetSet($key, $val);
                 }
@@ -555,16 +603,17 @@ class Converter
     }
 
     /**
+     * @param array<string, string> $genericTypesMap
      * @throws Throwable
      */
-    private function convertNativeProperty(ReflectionProperty $property, Definitions $definitions): JsonSchema\Schema
+    private function convertNativeProperty(ReflectionProperty $property, array $genericTypesMap, Definitions $definitions): JsonSchema\Schema
     {
         $docBlock = Factory::createInstance()->createFromReflector($property);
 
         /** @var null|PhpDocParser\Ast\PhpDoc\VarTagValueNode $varTag */
         $varTag = $docBlock->findTag('@var');
         $schema = $varTag
-            ? $this->convertVirtualType($varTag->type, $property->class, [], $definitions)
+            ? $this->convertVirtualType($varTag->type, $property->class, [], $definitions, $genericTypesMap)
             : $this->convertNativeType($property->getType(), $property->class, $definitions);
 
         if ($property->hasDefaultValue()) {
