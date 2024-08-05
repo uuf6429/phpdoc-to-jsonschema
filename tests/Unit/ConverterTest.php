@@ -629,14 +629,27 @@ class ConverterTest extends TestCase
                 PHP,
             'expectedException' => new RuntimeException('`missing` cannot be converted to JSON Schema'),
         ];
+    }
 
-        yield 'generic object cannot be converted' => [
-            'phpdocComment' => <<<'PHP'
-               /**
-                * @return object<int>
-                */
-               PHP,
-            'expectedException' => new LogicException('`object<int>` cannot be converted to JSON Schema'),
-        ];
+    /**
+     * @throws Throwable
+     */
+    public function testThatGenericObjectIsNotParsable(): void
+    {
+        $converter = new Converter();
+        $docblock = PhpDoc\Factory::createInstance()
+            ->createFromComment(
+                comment: <<<'PHP'
+                /**
+                 * @return object<int>
+                 */
+                PHP,
+                class: EmptyClass::class
+            );
+
+        $this->expectException(LogicException::class);
+        $this->expectExceptionMessage('Cannot get original template types on type: object<int>');
+
+        $docblock->getTag('@return');
     }
 }
