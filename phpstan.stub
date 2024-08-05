@@ -1,0 +1,32 @@
+<?php
+
+namespace {
+    abstract class ReflectionClass
+    {
+        /**
+         * @see https://github.com/phpstan/phpstan/issues/11334
+         * @return class-string
+         */
+        abstract public function getName(): string;
+    }
+
+    abstract class ReflectionProperty
+    {
+        /**
+         * @see https://github.com/phpstan/phpstan/issues/11334
+         * @var class-string
+         */
+        public string $class;
+    }
+}
+
+namespace Swaggest\JsonSchema {
+    abstract class JsonSchema
+    {
+        /**
+         * @see https://github.com/swaggest/php-json-schema/issues/162
+         * @var null|object|\ArrayObject<string, JsonSchema>
+         */
+        public null|object $definitions;
+    }
+}

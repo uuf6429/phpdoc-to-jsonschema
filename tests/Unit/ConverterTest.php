@@ -4,7 +4,7 @@ namespace uuf6429\PHPDocToJSONSchemaTests\Unit;
 
 use Exception;
 use LogicException;
-use phpDocumentor\Reflection\DocBlockFactory;
+use PHPStan\PhpDocParser\Ast\PhpDoc\ReturnTagValueNode;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
@@ -12,6 +12,7 @@ use Swaggest\JsonSchema\Schema;
 use Throwable;
 use uuf6429\PHPDocToJSONSchema\Converter;
 use uuf6429\PHPDocToJSONSchemaTests\Fixtures\EmptyClass;
+use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc;
 
 class ConverterTest extends TestCase
 {
@@ -23,11 +24,12 @@ class ConverterTest extends TestCase
     #[DataProvider('validConversionsDataProvider')]
     public function testThatValidConversionsWork(string $phpdocComment, array $expectedResult, ?string $currentClass = null): void
     {
-        $docblock = DocBlockFactory::createInstance()->create($phpdocComment);
         $converter = new Converter();
-        $returnTag = $docblock->getTagsWithTypeByName('return')[0];
+        $docblock = PhpDoc\Factory::createInstance()->createFromComment($phpdocComment, class: EmptyClass::class);
+        /** @var ReturnTagValueNode $returnTag */
+        $returnTag = $docblock->getTag('@return');
 
-        $result = $converter->convertTag($returnTag, $currentClass);
+        $result = $converter->convertType($returnTag->type, $currentClass);
 
         $this->assertEquals((object)$expectedResult, Schema::export($result));
     }
@@ -48,7 +50,49 @@ class ConverterTest extends TestCase
             ],
         ];
 
-        yield 'string value' => [
+        yield 'lowercase string' => [
+            'phpdocComment' => <<<'PHP'
+                /**
+                 * @return lowercase-string
+                 */
+                PHP,
+            'expectedResult' => [
+                'type' => 'string',
+                'pattern' => '/^[^A-Z]*$/',
+            ],
+        ];
+
+        yield 'numeric string' => [
+            'phpdocComment' => <<<'PHP'
+                /**
+                 * @return numeric-string
+                 */
+                PHP,
+            'expectedResult' => [
+                'type' => 'string',
+                'pattern' => '/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/',
+            ],
+        ];
+
+        yield 'numeric value' => [
+            'phpdocComment' => <<<'PHP'
+                /**
+                 * @return numeric
+                 */
+                PHP,
+            'expectedResult' => [
+                'anyOf' => [
+                    (object)['type' => 'number'],
+                    (object)['type' => 'integer'],
+                    (object)[
+                        'type' => 'string',
+                        'pattern' => '/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/',
+                    ],
+                ],
+            ],
+        ];
+
+        yield 'string literal' => [
             'phpdocComment' => <<<'PHP'
                 /**
                  * @return 'test'
@@ -135,30 +179,26 @@ class ConverterTest extends TestCase
             ],
         ];
 
-        yield 'object of integers' => [
+        yield 'object shape' => [
             'phpdocComment' => <<<'PHP'
-               /**
-                * @return object<int>
-                */
-               PHP,
+                      /**
+                       * @return object{'aa': string, bb?: bool, cc: int|float}
+                       */
+                      PHP,
             'expectedResult' => [
                 'type' => 'object',
-                'additionalProperties' => (object)[
-                    'type' => 'integer',
+                'properties' => (object)[
+                    'aa' => (object)['type' => 'string'],
+                    'bb' => (object)['type' => 'boolean'],
+                    'cc' => (object)['type' => ['integer', 'number']],
                 ],
+                'required' => [
+                    'aa',
+                    'cc',
+                ],
+                'additionalProperties' => true,
             ],
         ];
-
-        //        yield 'object shape' => [
-        //            'phpdocComment' => <<<'PHP'
-        //                /**
-        //                 * @return object{aa: string, bb: int}
-        //                 */
-        //                PHP,
-        //            'expectedResult' => [
-        //                'type' => ['string', 'integer', 'number', 'boolean'],
-        //            ],
-        //        ];
 
         yield 'false or integer' => [
             'phpdocComment' => <<<'PHP'
@@ -553,14 +593,15 @@ class ConverterTest extends TestCase
     #[DataProvider('invalidConversionsDataProvider')]
     public function testThatInvalidConversionsFail(string $phpdocComment, Exception $expectedException): void
     {
-        $docblock = DocBlockFactory::createInstance()->create($phpdocComment);
         $converter = new Converter();
-        $returnTag = $docblock->getTagsWithTypeByName('return')[0];
+        $docblock = PhpDoc\Factory::createInstance()->createFromComment($phpdocComment, class: EmptyClass::class);
+        /** @var ReturnTagValueNode $returnTag */
+        $returnTag = $docblock->getTag('@return');
 
         $this->expectException(get_class($expectedException));
         $this->expectExceptionMessage($expectedException->getMessage());
 
-        $converter->convertTag($returnTag, null);
+        $converter->convertType($returnTag->type, null);
     }
 
     /**
@@ -568,15 +609,6 @@ class ConverterTest extends TestCase
      */
     public static function invalidConversionsDataProvider(): iterable
     {
-        yield 'self cannot be resolved without a current class' => [
-            'phpdocComment' => <<<'PHP'
-                /**
-                 * @return self
-                 */
-                PHP,
-            'expectedException' => new LogicException('Cannot convert `$this` type when `$currentClass` is empty'),
-        ];
-
         yield '"void" cannot be converted' => [
             'phpdocComment' => <<<'PHP'
                 /**
@@ -601,16 +633,25 @@ class ConverterTest extends TestCase
                  * @return resource
                  */
                 PHP,
-            'expectedException' => new LogicException('Resources cannot be converted to JSON Schema'),
+            'expectedException' => new LogicException('`resource` cannot be converted to JSON Schema'),
         ];
 
-        yield 'callable cannot be converted' => [
+        yield 'simple callable cannot be converted' => [
             'phpdocComment' => <<<'PHP'
                 /**
                  * @return callable
                  */
                 PHP,
-            'expectedException' => new LogicException('Callable cannot be converted to JSON Schema'),
+            'expectedException' => new LogicException('`callable` cannot be converted to JSON Schema'),
+        ];
+
+        yield 'complex callable cannot be converted' => [
+            'phpdocComment' => <<<'PHP'
+                /**
+                 * @return callable(int): string
+                 */
+                PHP,
+            'expectedException' => new LogicException('`callable` cannot be converted to JSON Schema'),
         ];
 
         yield 'non-backed enum cannot be converted' => [
@@ -628,7 +669,28 @@ class ConverterTest extends TestCase
                  * @return missing
                  */
                 PHP,
-            'expectedException' => new RuntimeException('Could not find class `\missing`'),
+            'expectedException' => new RuntimeException('`missing` (PHPStan\PhpDocParser\Ast\Type\IdentifierTypeNode) cannot be converted to JSON Schema'),
         ];
+    }
+
+    /**
+     * @throws Throwable
+     */
+    public function testThatGenericObjectIsNotParsable(): void
+    {
+        $docblock = PhpDoc\Factory::createInstance()
+            ->createFromComment(
+                comment: <<<'PHP'
+                /**
+                 * @return object<int>
+                 */
+                PHP,
+                class: EmptyClass::class,
+            );
+
+        $this->expectException(LogicException::class);
+        $this->expectExceptionMessage('Cannot get original template types on type: object<int>');
+
+        $docblock->getTag('@return');
     }
 }
