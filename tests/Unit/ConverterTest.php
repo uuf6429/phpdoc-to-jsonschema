@@ -50,6 +50,48 @@ class ConverterTest extends TestCase
             ],
         ];
 
+        yield 'lowercase string' => [
+            'phpdocComment' => <<<'PHP'
+                /**
+                 * @return lowercase-string
+                 */
+                PHP,
+            'expectedResult' => [
+                'type' => 'string',
+                'pattern' => '/^[^A-Z]*$/',
+            ],
+        ];
+
+        yield 'numeric string' => [
+            'phpdocComment' => <<<'PHP'
+                /**
+                 * @return numeric-string
+                 */
+                PHP,
+            'expectedResult' => [
+                'type' => 'string',
+                'pattern' => '/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/',
+            ],
+        ];
+
+        yield 'numeric value' => [
+            'phpdocComment' => <<<'PHP'
+                /**
+                 * @return numeric
+                 */
+                PHP,
+            'expectedResult' => [
+                'anyOf' => [
+                    (object)['type' => 'number'],
+                    (object)['type' => 'integer'],
+                    (object)[
+                        'type' => 'string',
+                        'pattern' => '/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/',
+                    ],
+                ],
+            ],
+        ];
+
         yield 'string literal' => [
             'phpdocComment' => <<<'PHP'
                 /**
@@ -627,7 +669,7 @@ class ConverterTest extends TestCase
                  * @return missing
                  */
                 PHP,
-            'expectedException' => new RuntimeException('`missing` cannot be converted to JSON Schema'),
+            'expectedException' => new RuntimeException('`missing` (PHPStan\PhpDocParser\Ast\Type\IdentifierTypeNode) cannot be converted to JSON Schema'),
         ];
     }
 
@@ -636,7 +678,6 @@ class ConverterTest extends TestCase
      */
     public function testThatGenericObjectIsNotParsable(): void
     {
-        $converter = new Converter();
         $docblock = PhpDoc\Factory::createInstance()
             ->createFromComment(
                 comment: <<<'PHP'
@@ -644,7 +685,7 @@ class ConverterTest extends TestCase
                  * @return object<int>
                  */
                 PHP,
-                class: EmptyClass::class
+                class: EmptyClass::class,
             );
 
         $this->expectException(LogicException::class);

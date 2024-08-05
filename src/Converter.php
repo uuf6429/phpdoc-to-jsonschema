@@ -28,7 +28,7 @@ class Converter
      * implementation in Psalm.
      * @see https://github.com/vimeo/psalm/issues/11022
      */
-    private const LC_STRING_PATTERN = '/^[^A-Z]*$/';
+    private const LOWERCASE_STRING_PATTERN = '/^[^A-Z]*$/';
 
     /**
      * @see https://stackoverflow.com/a/13340826/314056
@@ -95,7 +95,7 @@ class Converter
                 type: new PhpDocParser\Ast\Type\IdentifierTypeNode(
                     $genericTypesMap[$type->name]
                     ?? $type->bound?->name
-                    ?? throw new RuntimeException('Template Type node should point to a valid template type (defined with an "@template" tag) or at least a valid lower bound (e.g. "T of bound")')
+                    ?? throw new RuntimeException('Template Type node should point to a valid template type (defined with an "@template" tag) or at least a valid lower bound (e.g. "T of bound")'),
                 ),
                 currentClass: $currentClass,
                 options: [],
@@ -147,6 +147,7 @@ class Converter
             $type instanceof PhpDocParser\Ast\Type\GenericTypeNode
             => $this->createSchema([
                 '$ref' => $this->getRegisteredGenericDefinitionRef($type, $definitions),
+                ...$options,
             ]),
 
             $type instanceof PhpDocParser\Ast\Type\IntersectionTypeNode
@@ -169,22 +170,38 @@ class Converter
                 => throw new LogicException("`$type->name` cannot be converted to JSON Schema"),
 
                 ($jsType = self::NATIVE_TYPE_MAP[$type->name] ?? null) !== null
-                => $this->createSchema(['type' => $jsType]),
+                => $this->createSchema(['type' => $jsType, ...$options]),
 
                 $type->name === 'mixed'
-                => $this->createSchema([]),
+                => $this->createSchema($options),
 
                 $type->name === 'object'
-                => $this->createSchema(['type' => 'object', 'additionalProperties' => true]),
+                => $this->createSchema(['type' => 'object', 'additionalProperties' => true, ...$options]),
 
                 $type->name === 'true'
-                => $this->createSchema(['const' => true]),
+                => $this->createSchema(['const' => true, ...$options]),
 
                 $type->name === 'false'
-                => $this->createSchema(['const' => false]),
+                => $this->createSchema(['const' => false, ...$options]),
 
                 $type->name === 'scalar'
-                => $this->createSchema(['type' => ['string', 'integer', 'number', 'boolean']]),
+                => $this->createSchema(['type' => ['string', 'integer', 'number', 'boolean'], ...$options]),
+
+                $type->name === 'lowercase-string'
+                => $this->createSchema(['type' => 'string', 'pattern' => self::LOWERCASE_STRING_PATTERN, ...$options]),
+
+                $type->name === 'numeric-string'
+                => $this->createSchema(['type' => 'string', 'pattern' => self::NUMERIC_STRING_PATTERN, ...$options]),
+
+                $type->name === 'numeric'
+                => $this->createSchema([
+                    'anyOf' => [
+                        (object)['type' => 'number'],
+                        (object)['type' => 'integer'],
+                        (object)['type' => 'string', 'pattern' => self::NUMERIC_STRING_PATTERN],
+                    ],
+                    ...$options,
+                ]),
 
                 interface_exists($type->name),
                 trait_exists($type->name),
@@ -192,10 +209,11 @@ class Converter
                 class_exists($type->name)
                 => $this->createSchema([
                     '$ref' => $this->getRegisteredDefinitionRef($type->name, $definitions),
+                    ...$options,
                 ]),
 
                 default
-                => throw new RuntimeException("`$type->name` cannot be converted to JSON Schema"),
+                => throw new RuntimeException("`$type->name` (" . get_debug_type($type) . ") cannot be converted to JSON Schema"),
             },
 
             $type instanceof PhpDocParser\Ast\Type\NullableTypeNode
@@ -207,13 +225,13 @@ class Converter
                 => throw new RuntimeException('TODO 8.0'), // TODO
 
                 $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprIntegerNode
-                => $this->createSchema(['const' => (int)$constExpr->value]),
+                => $this->createSchema(['const' => (int)$constExpr->value, ...$options]),
 
                 $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprFloatNode
-                => $this->createSchema(['const' => (float)$constExpr->value]),
+                => $this->createSchema(['const' => (float)$constExpr->value, ...$options]),
 
                 $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprNullNode
-                => $this->createSchema(['const' => null]),
+                => $this->createSchema(['const' => null, ...$options]),
 
                 $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprArrayItemNode
                 => throw new RuntimeException('TODO 8.1'), // TODO
@@ -222,7 +240,7 @@ class Converter
                 => throw new RuntimeException('TODO 8.2'), // TODO
 
                 $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprStringNode
-                => $this->createSchema(['const' => $constExpr->value]),
+                => $this->createSchema(['const' => $constExpr->value, ...$options]),
 
                 $constExpr instanceof PhpDocParser\Ast\ConstExpr\DoctrineConstExprStringNode
                 => throw new RuntimeException('TODO 8.4'), // TODO
@@ -231,10 +249,10 @@ class Converter
                 => throw new RuntimeException('TODO 8.5'), // TODO
 
                 $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprFalseNode
-                => $this->createSchema(['const' => false]),
+                => $this->createSchema(['const' => false, ...$options]),
 
                 $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprTrueNode
-                => $this->createSchema(['const' => true]),
+                => $this->createSchema(['const' => true, ...$options]),
 
                 default
                 => throw new RuntimeException('Constant expression is not supported: ' . get_debug_type($constExpr)),
@@ -464,17 +482,17 @@ class Converter
                 ),
                 array_combine(
                     array_map(
-                        static fn(?object $node) => match (get_class($node)) {
-                            TemplateTypeNode::class => $node->name,
-                            PhpDocParser\Ast\Type\IdentifierTypeNode::class => $node->name,
+                        static fn(?object $node) => match (true) {
+                            $node instanceof TemplateTypeNode => $node->name,
+                            $node instanceof PhpDocParser\Ast\Type\IdentifierTypeNode => $node->name,
                             default => throw new RuntimeException("Template Type `" . get_debug_type($node) . "` is not supported: $node"),
                         },
                         $type->templateTypes,
                     ),
                     array_map(
-                        static fn(?object $node) => match (get_class($node)) {
-                            TemplateTypeNode::class => $node->name,
-                            PhpDocParser\Ast\Type\IdentifierTypeNode::class => $node->name,
+                        static fn(?object $node) => match (true) {
+                            $node instanceof TemplateTypeNode => $node->name,
+                            $node instanceof PhpDocParser\Ast\Type\IdentifierTypeNode => $node->name,
                             default => throw new RuntimeException("Concrete Type `" . get_debug_type($node) . "` is not supported: $node"),
                         },
                         $type->genericTypes,
