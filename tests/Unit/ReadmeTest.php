@@ -28,7 +28,10 @@ class ReadmeTest extends TestCase
      */
     public static function readmeDataProvider(): iterable
     {
-        $readme = file_get_contents(self::README_FILE) ?: '';
+        $readme = file_get_contents(str_replace(self::README_FILE, '/', DIRECTORY_SEPARATOR));
+        if ($readme === false) {
+            self::fail('The README.md file could not be read: ' . str_replace(self::README_FILE, '/', DIRECTORY_SEPARATOR));
+        }
 
         if (!preg_match('/\n## 🚀 Usage\n(.*)\n## 📖 Documentation\n/su', $readme, $matches)) {
             self::fail('"Usage" section could not be parsed from README.md file');
