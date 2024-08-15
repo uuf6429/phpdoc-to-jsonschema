@@ -2,11 +2,9 @@
 
 namespace uuf6429\PHPDocToJSONSchema;
 
-use ArrayObject;
-use Exception;
 use InvalidArgumentException;
 use LogicException;
-use phpDocumentor\Reflection;
+use PHPStan\PhpDocParser;
 use ReflectionClass;
 use ReflectionEnum;
 use ReflectionEnumBackedCase;
@@ -18,6 +16,10 @@ use ReflectionUnionType;
 use RuntimeException;
 use Swaggest\JsonSchema;
 use Throwable;
+use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc\Block;
+use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc\Factory;
+use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc\Types\ConcreteGenericTypeNode;
+use uuf6429\PHPStanPHPDocTypeResolver\PhpDoc\Types\TemplateTypeNode;
 
 class Converter
 {
@@ -26,7 +28,7 @@ class Converter
      * implementation in Psalm.
      * @see https://github.com/vimeo/psalm/issues/11022
      */
-    private const LC_STRING_PATTERN = '/^[^A-Z]*$/';
+    private const LOWERCASE_STRING_PATTERN = '/^[^A-Z]*$/';
 
     /**
      * @see https://stackoverflow.com/a/13340826/314056
@@ -48,55 +50,30 @@ class Converter
         'string' => 'string',
     ];
 
-    /**
-     * A map from virtual types, to JsonSchema types.
-     */
-    private const VIRTUAL_TYPE_MAP = [
-        Reflection\Types\Null_::class => 'null',
-        Reflection\Types\Integer::class => 'integer',
-        Reflection\Types\Float_::class => 'number',
-        Reflection\Types\Boolean::class => 'boolean',
-        Reflection\Types\String_::class => 'string',
+    private const INVALID_TYPES = [
+        'callable',
+        'resource',
+        'void',
+        'never',
     ];
 
     /**
      * @param class-string|null $currentClass Fully-qualified class name of where the type occurred, when applicable.
+     * @param array<string, string> $genericTypesMap A mapping of <template type> => <concrete type> pairs, for use when `$type` is or contains generic templates.
      * @throws Throwable
      */
-    public function convertTag(Reflection\DocBlock\Tags\TagWithType $tag, ?string $currentClass): JsonSchema\Schema
+    public function convertType(PhpDocParser\Ast\Type\TypeNode $type, ?string $currentClass, array $genericTypesMap = []): JsonSchema\Schema
     {
-        $type = $tag->getType() ?? throw new InvalidArgumentException('Tag does not have a type');
+        $definitions = new Definitions();
 
-        $result = $this->convertType($type, $currentClass);
-        $this->applyTitleAndDescription($result, (string)($tag->getDescription() ?? ''));
+        $result = $this->convertVirtualType($type, $currentClass, [], $definitions, $genericTypesMap);
 
-        if ($tag->getName() === 'property-read') {
-            $result->offsetSet('readOnly', true);
+        if (!$definitions->isComplete()) {
+            throw new RuntimeException('Definitions have not been built successfully');
         }
 
-        if ($tag->getName() === 'property-write') {
-            $result->offsetSet('writeOnly', true);
-        }
-
-        return $result;
-    }
-
-    /**
-     * @param class-string|null $currentClass Fully-qualified class name of where the type occurred, when applicable.
-     * @throws Throwable
-     */
-    public function convertType(Reflection\Type $type, ?string $currentClass): JsonSchema\Schema
-    {
-        $definitions = new ArrayObject();
-
-        $result = $this->convertVirtualType($type, $currentClass, [], $definitions);
-
-        if ($definitions->count()) {
-            /**
-             * @see https://github.com/swaggest/php-json-schema/issues/162
-             * @phpstan-ignore-next-line
-             */
-            $result->definitions = (object)array_merge((array)($result->definitions ?? []), (array)$definitions);
+        if (!$definitions->isEmpty()) {
+            $result->definitions = $definitions->mergeWith($result->definitions);
         }
 
         return $result;
@@ -104,218 +81,225 @@ class Converter
 
     /**
      * @param null|class-string $currentClass
-     * @param ArrayObject<string, JsonSchema\Schema> $definitions
-     * @throws Throwable
-     */
-    public function doConvertTag(Reflection\DocBlock\Tags\TagWithType $tag, ?string $currentClass, ArrayObject $definitions): JsonSchema\Schema
-    {
-        $type = $tag->getType() ?? throw new InvalidArgumentException('Tag does not have a type');
-
-        $result = $this->convertVirtualType($type, $currentClass, [], $definitions);
-        $this->applyTitleAndDescription($result, (string)($tag->getDescription() ?? ''));
-
-        if ($tag->getName() === 'property-read') {
-            $result->offsetSet('readOnly', true);
-        }
-
-        if ($tag->getName() === 'property-write') {
-            $result->offsetSet('writeOnly', true);
-        }
-
-        return $result;
-    }
-
-    /**
-     * @param class-string|null $currentClass
      * @param array<string, mixed> $options
-     * @param ArrayObject<string, JsonSchema\Schema> $definitions
+     * @param array<string, string> $genericTypesMap
      * @throws Throwable
      */
-    private function convertVirtualType(Reflection\Type $type, ?string $currentClass, array $options, ArrayObject $definitions): JsonSchema\Schema
+    private function convertVirtualType(PhpDocParser\Ast\Type\TypeNode $type, ?string $currentClass, array $options, Definitions $definitions, array $genericTypesMap): JsonSchema\Schema
     {
-        switch (true) {
-            // We don't care about the following interfaces; they're already handled:
-            // - Reflection\PseudoType
-            // - Reflection\Types\AbstractList
-            // - Reflection\Types\AggregatedType
-            // - Reflection\PseudoTypes\TraitString
-            // - Reflection\PseudoTypes\HtmlEscapedString
-            // - Reflection\PseudoTypes\LiteralString      Meant for security-oriented is_literal, which AFAIK has no counterpart in JSON Schema
+        $constExpr = $type instanceof PhpDocParser\Ast\Type\ConstTypeNode ? $type->constExpr : null;
 
-            case $type instanceof Reflection\Types\ArrayKey:
-                throw new LogicException('Array key type cannot be converted to JSON Schema (this case should not have been reached)');
+        return match (true) {
+            $type instanceof TemplateTypeNode
+            => $this->convertVirtualType(
+                type: new PhpDocParser\Ast\Type\IdentifierTypeNode(
+                    $genericTypesMap[$type->name]
+                    ?? $type->bound?->name
+                    ?? throw new RuntimeException('Template Type node should point to a valid template type (defined with an "@template" tag) or at least a valid lower bound (e.g. "T of bound")'),
+                ),
+                currentClass: $currentClass,
+                options: [],
+                definitions: $definitions,
+                genericTypesMap: $genericTypesMap,
+            ),
 
-            case $type instanceof Reflection\Types\ClassString:
-            case $type instanceof Reflection\Types\InterfaceString:
-                throw new Exception('TODO'); // TODO
+            $type instanceof PhpDocParser\Ast\Type\InvalidTypeNode
+            => throw new LogicException('Invalid node cannot be converted to JSON Schema', 0, $type->getException()),
 
-            case $type instanceof Reflection\PseudoTypes\ArrayShape:
-                throw new Exception('TODO'); // TODO
+            $type instanceof PhpDocParser\Ast\Type\ObjectShapeNode
+            => $this->createSchema([
+                'type' => 'object',
+                'properties' => (object)array_combine(
+                    array_map(strval(...), array_column($type->items, 'keyName')),
+                    array_map(
+                        fn(PhpDocParser\Ast\Type\ObjectShapeItemNode $item) => JsonSchema\Schema::export(
+                            $this->convertVirtualType($item->valueType, $currentClass, [], $definitions, $genericTypesMap),
+                        ),
+                        $type->items,
+                    ),
+                ),
+                'required' => array_values(
+                    array_filter(
+                        array_map(
+                            static fn(PhpDocParser\Ast\Type\ObjectShapeItemNode $item): ?string => $item->optional ? null : (string)$item->keyName,
+                            $type->items,
+                        ),
+                    ),
+                ),
+                'additionalProperties' => true,
+            ]),
 
-            case $type instanceof Reflection\PseudoTypes\CallableString:
-                throw new Exception('TODO'); // TODO should we simply return the string, at most with some simple pattern matching?
+            $type instanceof PhpDocParser\Ast\Type\ConditionalTypeForParameterNode
+            => throw new RuntimeException('TODO 1'), // TODO
 
-            case $type instanceof Reflection\PseudoTypes\ConstExpression:
-                throw new LogicException('Const expression cannot be converted to JSON Schema'); // TODO actually I think we could/should...needs investigation
+            $type instanceof PhpDocParser\Ast\Type\ConditionalTypeNode
+            => throw new RuntimeException('TODO 2'), // TODO
 
-            case $type instanceof Reflection\PseudoTypes\False_:
-                return $this->createSchema(['const' => false, ...$options]);
+            $type instanceof PhpDocParser\Ast\Type\ArrayShapeItemNode
+            => throw new RuntimeException('TODO 3'), // TODO
 
-            case $type instanceof Reflection\PseudoTypes\FloatValue:
-                return $this->createSchema(['const' => $type->getValue(), ...$options]);
+            $type instanceof PhpDocParser\Ast\Type\ArrayShapeNode
+            => throw new RuntimeException('TODO 4'), // TODO
 
-            case $type instanceof Reflection\PseudoTypes\IntegerRange:
-                return $this->createSchema(['type' => 'integer', 'minimum' => $type->getMinValue(), 'maximum' => $type->getMaxValue(), ...$options]);
+            $type instanceof PhpDocParser\Ast\Type\ArrayTypeNode
+            => throw new RuntimeException('TODO 5'), // TODO
 
-            case $type instanceof Reflection\PseudoTypes\IntegerValue:
-                return $this->createSchema(['const' => $type->getValue(), ...$options]);
+            $type instanceof PhpDocParser\Ast\Type\GenericTypeNode
+            => $this->createSchema([
+                '$ref' => $this->getRegisteredGenericDefinitionRef($type, $definitions),
+                ...$options,
+            ]),
 
-            case $type instanceof Reflection\PseudoTypes\List_:
-                return $this->createSchema(['type' => 'array', 'items' => $this->convertVirtualType($type->getValueType(), $currentClass, [], $definitions), ...$options]);
+            $type instanceof PhpDocParser\Ast\Type\IntersectionTypeNode
+            => $this->createSchema([
+                'allOf' => array_map(
+                    fn(PhpDocParser\Ast\Type\TypeNode $subType) => JsonSchema\Schema::export(
+                        $this->convertVirtualType($subType, $currentClass, [], $definitions, $genericTypesMap),
+                    ),
+                    $type->types,
+                ),
+                ...$options,
+            ]),
 
-            case $type instanceof Reflection\PseudoTypes\LowercaseString:
-                return $this->createSchema(['type' => 'string', 'pattern' => self::LC_STRING_PATTERN, ...$options]);
+            $type instanceof PhpDocParser\Ast\Type\OffsetAccessTypeNode
+            => throw new RuntimeException('TODO 7'), // TODO
 
-            case $type instanceof Reflection\PseudoTypes\NegativeInteger:
-                return $this->createSchema(['type' => 'integer', 'exclusiveMaximum' => 0, ...$options]);
+            $type instanceof PhpDocParser\Ast\Type\IdentifierTypeNode
+            => match (true) {
+                in_array($type->name, self::INVALID_TYPES)
+                => throw new LogicException("`$type->name` cannot be converted to JSON Schema"),
 
-            case $type instanceof Reflection\PseudoTypes\NonEmptyList:
-                return $this->createSchema(['type' => 'array', 'items' => $this->convertVirtualType($type->getValueType(), $currentClass, [], $definitions), 'minItems' => 1, ...$options]);
+                ($jsType = self::NATIVE_TYPE_MAP[$type->name] ?? null) !== null
+                => $this->createSchema(['type' => $jsType, ...$options]),
 
-            case $type instanceof Reflection\PseudoTypes\NonEmptyLowercaseString:
-                return $this->createSchema(['type' => 'string', 'minLength' => 1, 'pattern' => self::LC_STRING_PATTERN, ...$options]);
+                $type->name === 'mixed'
+                => $this->createSchema($options),
 
-            case $type instanceof Reflection\PseudoTypes\NonEmptyString:
-                return $this->createSchema(['type' => 'string', 'minLength' => 1, ...$options]);
+                $type->name === 'object'
+                => $this->createSchema(['type' => 'object', 'additionalProperties' => true, ...$options]),
 
-            case $type instanceof Reflection\PseudoTypes\NumericString:
-                return $this->createSchema(['type' => 'string', 'pattern' => self::NUMERIC_STRING_PATTERN, ...$options]);
+                $type->name === 'true'
+                => $this->createSchema(['const' => true, ...$options]),
 
-            case $type instanceof Reflection\PseudoTypes\Numeric_:
-                return $this->createSchema(['type' => ['number', 'integer', 'string'], 'pattern' => self::NUMERIC_STRING_PATTERN, ...$options]);
+                $type->name === 'false'
+                => $this->createSchema(['const' => false, ...$options]),
 
-            case $type instanceof Reflection\PseudoTypes\PositiveInteger:
-                return $this->createSchema(['type' => 'integer', 'exclusiveMinimum' => 0, ...$options]);
+                $type->name === 'scalar'
+                => $this->createSchema(['type' => ['string', 'integer', 'number', 'boolean'], ...$options]),
 
-            case $type instanceof Reflection\PseudoTypes\StringValue:
-                return $this->createSchema(['const' => $type->getValue(), ...$options]);
+                $type->name === 'lowercase-string'
+                => $this->createSchema(['type' => 'string', 'pattern' => self::LOWERCASE_STRING_PATTERN, ...$options]),
 
-            case $type instanceof Reflection\PseudoTypes\True_:
-                return $this->createSchema(['const' => true, ...$options]);
+                $type->name === 'numeric-string'
+                => $this->createSchema(['type' => 'string', 'pattern' => self::NUMERIC_STRING_PATTERN, ...$options]),
 
-            case $type instanceof Reflection\Types\Array_:
-            case $type instanceof Reflection\Types\Collection:
-                return $this->createSchema([
-                    'type' => 'object',
-                    'additionalProperties' => JsonSchema\Schema::export(
-                        $this->convertVirtualType($type->getValueType(), $currentClass, [], $definitions),
+                $type->name === 'numeric'
+                => $this->createSchema([
+                    'anyOf' => [
+                        (object)['type' => 'number'],
+                        (object)['type' => 'integer'],
+                        (object)['type' => 'string', 'pattern' => self::NUMERIC_STRING_PATTERN],
+                    ],
+                    ...$options,
+                ]),
+
+                interface_exists($type->name),
+                trait_exists($type->name),
+                enum_exists($type->name),
+                class_exists($type->name)
+                => $this->createSchema([
+                    '$ref' => $this->getRegisteredDefinitionRef($type->name, $definitions),
+                    ...$options,
+                ]),
+
+                default
+                => throw new RuntimeException("`$type->name` (" . get_debug_type($type) . ") cannot be converted to JSON Schema"),
+            },
+
+            $type instanceof PhpDocParser\Ast\Type\NullableTypeNode
+            => $this->makeSchemaNullable($this->convertVirtualType($type->type, $currentClass, $options, $definitions, $genericTypesMap)),
+
+            $type instanceof PhpDocParser\Ast\Type\ConstTypeNode
+            => match (true) {
+                $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprArrayNode
+                => throw new RuntimeException('TODO 8.0'), // TODO
+
+                $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprIntegerNode
+                => $this->createSchema(['const' => (int)$constExpr->value, ...$options]),
+
+                $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprFloatNode
+                => $this->createSchema(['const' => (float)$constExpr->value, ...$options]),
+
+                $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprNullNode
+                => $this->createSchema(['const' => null, ...$options]),
+
+                $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprArrayItemNode
+                => throw new RuntimeException('TODO 8.1'), // TODO
+
+                $constExpr instanceof PhpDocParser\Ast\ConstExpr\QuoteAwareConstExprStringNode
+                => throw new RuntimeException('TODO 8.2'), // TODO
+
+                $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprStringNode
+                => $this->createSchema(['const' => $constExpr->value, ...$options]),
+
+                $constExpr instanceof PhpDocParser\Ast\ConstExpr\DoctrineConstExprStringNode
+                => throw new RuntimeException('TODO 8.4'), // TODO
+
+                $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstFetchNode
+                => throw new RuntimeException('TODO 8.5'), // TODO
+
+                $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprFalseNode
+                => $this->createSchema(['const' => false, ...$options]),
+
+                $constExpr instanceof PhpDocParser\Ast\ConstExpr\ConstExprTrueNode
+                => $this->createSchema(['const' => true, ...$options]),
+
+                default
+                => throw new RuntimeException('Constant expression is not supported: ' . get_debug_type($constExpr)),
+            },
+
+            $type instanceof PhpDocParser\Ast\Type\CallableTypeNode
+            => throw new LogicException('`callable` cannot be converted to JSON Schema'),
+
+            $type instanceof PhpDocParser\Ast\Type\ThisTypeNode
+            => $this->createSchema([
+                '$ref' => $this->getRegisteredDefinitionRef(
+                    $currentClass ?? throw new InvalidArgumentException('Cannot convert `$this` type when `$currentClass` is empty'),
+                    $definitions,
+                ),
+                ...$options,
+            ]),
+
+            $type instanceof PhpDocParser\Ast\Type\ObjectShapeItemNode
+            => throw new RuntimeException('TODO 10'), // TODO
+
+            $type instanceof PhpDocParser\Ast\Type\UnionTypeNode
+            => ($scalarTypes = $this->tryGettingScalarTypesVirtual($type)) !== null
+                ? $this->createSchema(['type' => $scalarTypes, ...$options])
+                : $this->createSchema([
+                    'anyOf' => array_map(
+                        fn(PhpDocParser\Ast\Type\TypeNode $subType) => JsonSchema\Schema::export(
+                            $this->convertVirtualType($subType, $currentClass, [], $definitions, $genericTypesMap),
+                        ),
+                        $type->types,
                     ),
                     ...$options,
-                ]);
+                ]),
 
-            case $type instanceof Reflection\Types\Iterable_:
-                throw new LogicException('Iterables cannot be converted to JSON Schema; they are normally serialized to an empty object');
-
-            case $type instanceof Reflection\Types\Compound:
-                return ($scalarTypes = $this->tryGettingScalarTypesVirtual($type)) !== null
-                    ? $this->createSchema(['type' => $scalarTypes, ...$options])
-                    : $this->createSchema([
-                        'anyOf' => array_map(
-                            fn(Reflection\Type $subType) => JsonSchema\Schema::export(
-                                $this->convertVirtualType($subType, $currentClass, [], $definitions),
-                            ),
-                            iterator_to_array($type->getIterator()),
-                        ),
-                        ...$options,
-                    ]);
-
-            case $type instanceof Reflection\Types\Intersection:
-                return $this->createSchema([
-                    'allOf' => array_map(
-                        fn(Reflection\Type $subType) => JsonSchema\Schema::export(
-                            $this->convertVirtualType($subType, $currentClass, [], $definitions),
-                        ),
-                        iterator_to_array($type->getIterator()),
-                    ),
-                    ...$options,
-                ]);
-
-            case $type instanceof Reflection\Types\Boolean:
-                return $this->createSchema(['type' => 'boolean', ...$options]);
-
-            case $type instanceof Reflection\Types\Callable_:
-                throw new LogicException('Callable cannot be converted to JSON Schema');
-
-            case $type instanceof Reflection\Types\Expression:
-                throw new LogicException('Expression cannot be converted to JSON Schema');
-
-            case $type instanceof Reflection\Types\Float_:
-                return $this->createSchema(['type' => 'number', ...$options]);
-
-            case $type instanceof Reflection\Types\Integer:
-                return $this->createSchema(['type' => 'integer', ...$options]);
-
-            case $type instanceof Reflection\Types\Mixed_:
-                return $this->createSchema($options);
-
-            case $type instanceof Reflection\Types\Never_:
-                throw new LogicException('`never` cannot be converted to JSON Schema');
-
-            case $type instanceof Reflection\Types\Nullable:
-                $actual = $this->convertVirtualType($type->getActualType(), $currentClass, $options, $definitions);
-                $actual->type = ['null', $actual->type];
-                return $actual;
-
-            case $type instanceof Reflection\Types\Null_:
-                return $this->createSchema(['type' => 'null', ...$options]);
-
-            case $type instanceof Reflection\Types\Object_:
-                $targetClass = (string)$type->getFqsen();
-                if ($targetClass === '') {
-                    return $this->createSchema(['type' => 'object', 'additionalProperties' => true]);
-                }
-                class_exists($targetClass) or throw new RuntimeException("Could not find class `$targetClass`");
-                return $this->createSchema(['$ref' => $this->getRegisteredDefinitionRef($targetClass, $definitions), ...$options]);
-
-            case $type instanceof Reflection\Types\Parent_:
-                $currentClass or throw new InvalidArgumentException('Cannot convert `parent` type when `$currentClass` is empty');
-                $parentClass = get_parent_class($currentClass);
-                $parentClass or throw new InvalidArgumentException('Cannot convert `parent` type when `$currentClass` does not extend anything: ' . $currentClass);
-                return $this->createSchema(['$ref' => $this->getRegisteredDefinitionRef($parentClass, $definitions), ...$options]);
-
-            case $type instanceof Reflection\Types\Resource_:
-                throw new LogicException('Resources cannot be converted to JSON Schema');
-
-            case $type instanceof Reflection\Types\Scalar:
-                return $this->createSchema(['type' => ['string', 'integer', 'number', 'boolean'], ...$options]);
-
-            case $type instanceof Reflection\Types\String_:
-                return $this->createSchema(['type' => 'string', ...$options]);
-
-            case $type instanceof Reflection\Types\Self_:
-            case $type instanceof Reflection\Types\Static_:
-            case $type instanceof Reflection\Types\This:
-                $currentClass or throw new InvalidArgumentException('Cannot convert `$this` type when `$currentClass` is empty');
-                return $this->createSchema(['$ref' => $this->getRegisteredDefinitionRef($currentClass, $definitions), ...$options]);
-
-            case $type instanceof Reflection\Types\Void_:
-                throw new LogicException('`void` cannot be converted to JSON Schema');
-        }
-
-        // @codeCoverageIgnoreStart
-        throw new RuntimeException('Unsupported reflected type: ' . get_class($type));
-        // @codeCoverageIgnoreEnd
+            default
+            => throw new RuntimeException('Unsupported type `' . get_debug_type($type) . '` cannot be converted to JSON Schema'),
+        };
     }
 
     /**
      * @param null|class-string $currentClass
-     * @param ArrayObject<string, JsonSchema\Schema> $definitions
      * @throws Throwable
      */
-    private function convertNativeType(null|ReflectionType $type, ?string $currentClass, ArrayObject $definitions): JsonSchema\Schema
+    private function convertNativeType(null|ReflectionType $type, ?string $currentClass, Definitions $definitions): JsonSchema\Schema
     {
         switch (true) {
-            case $type === null: // missing type is "mixed" type in php by default
+            case $type === null:
+                // "missing type" is "mixed" type in php by default
                 return $this->createSchema([]);
 
             case $type instanceof ReflectionNamedType && $type->isBuiltin() && $type->getName() === 'mixed':
@@ -349,7 +333,6 @@ class Converter
 
             case $type instanceof ReflectionNamedType && !$type->isBuiltin():
                 return $this->createSchema([
-                    /** @phpstan-ignore-next-line */
                     '$ref' => $this->getRegisteredDefinitionRef($type->getName(), $definitions),
                 ]);
 
@@ -411,13 +394,15 @@ class Converter
     /**
      * @return null|list<string>
      */
-    private function tryGettingScalarTypesVirtual(Reflection\Types\Compound $type): null|array
+    private function tryGettingScalarTypesVirtual(PhpDocParser\Ast\Type\UnionTypeNode $type): null|array
     {
         $result = [];
 
-        /** @var Reflection\Type $subType */
-        foreach ($type as $subType) {
-            if (($jsType = self::VIRTUAL_TYPE_MAP[get_class($subType)] ?? null) === null) {
+        foreach ($type->types as $subType) {
+            if (!$subType instanceof PhpDocParser\Ast\Type\IdentifierTypeNode) {
+                return null;
+            }
+            if (($jsType = self::NATIVE_TYPE_MAP[$subType->name] ?? null) === null) {
                 return null;
             }
             $result[] = $jsType;
@@ -456,45 +441,106 @@ class Converter
     }
 
     /**
-     * @param class-string $class
-     * @param ArrayObject<string, JsonSchema\Schema> $definitions
      * @throws Throwable
      */
-    private function getRegisteredDefinitionRef(string $class, ArrayObject $definitions): string
+    private function getRegisteredDefinitionRef(string $class, Definitions $definitions): string
     {
-        $reflector = new ReflectionClass($class);
-        $classKey = str_replace('\\', '.', $reflector->getName());
-        if (!$definitions->offsetExists($classKey)) {
-            // to avoid infinite recursion, set reference to empty schema before converting the real one
-            $definitions->offsetSet($classKey, new JsonSchema\Schema());
-            $definitions->offsetSet($classKey, $this->convertClassLike($reflector, $definitions));
-        }
+        $classKey = str_replace('\\', '.', ltrim($class, '\\'));
+        $definitions->defineIfNotDefined(
+            $classKey,
+            fn() => $this->convertClassLike(
+                new ReflectionClass(
+                    class_exists($class)
+                        ? $class
+                        : throw new LogicException("`$classKey` cannot be converted to JSON Schema"),
+                ),
+                [],
+                $definitions,
+            ),
+        );
 
         return "#/definitions/$classKey";
     }
 
     /**
-     * @param ReflectionClass<object> $reflector
-     * @param ArrayObject<string, JsonSchema\Schema> $definitions
      * @throws Throwable
      */
-    protected function convertClassLike(ReflectionClass $reflector, ArrayObject $definitions): JsonSchema\Schema
+    private function getRegisteredGenericDefinitionRef(PhpDocParser\Ast\Type\GenericTypeNode $type, Definitions $definitions): string
     {
-        $docBlock = Reflection\DocBlockFactory::createInstance()->create(trim($reflector->getDocComment() ?: '') ?: "/**\n*/");
+        if (!$type instanceof ConcreteGenericTypeNode) {
+            throw new RuntimeException("Incomplete/unresolved generic type cannot be converted to JSON Schema: $type");
+        }
+
+        $classKey = str_replace('\\', '.', $this->generateGenericClassName($type));
+        $definitions->defineIfNotDefined(
+            $classKey,
+            fn() => $this->convertClassLike(
+                new ReflectionClass(
+                    class_exists($class = $type->type->name)
+                        ? $class
+                        : throw new LogicException("`$classKey` cannot be converted to JSON Schema"),
+                ),
+                array_combine(
+                    array_map(
+                        static fn(?object $node) => match (true) {
+                            $node instanceof TemplateTypeNode => $node->name,
+                            $node instanceof PhpDocParser\Ast\Type\IdentifierTypeNode => $node->name,
+                            default => throw new RuntimeException("Template Type `" . get_debug_type($node) . "` is not supported: $node"),
+                        },
+                        $type->templateTypes,
+                    ),
+                    array_map(
+                        static fn(?object $node) => match (true) {
+                            $node instanceof TemplateTypeNode => $node->name,
+                            $node instanceof PhpDocParser\Ast\Type\IdentifierTypeNode => $node->name,
+                            default => throw new RuntimeException("Concrete Type `" . get_debug_type($node) . "` is not supported: $node"),
+                        },
+                        $type->genericTypes,
+                    ),
+                ),
+                $definitions,
+            ),
+        );
+
+        return "#/definitions/$classKey";
+    }
+
+    private function generateGenericClassName(PhpDocParser\Ast\Type\GenericTypeNode $type): string
+    {
+        return sprintf(
+            '%s<%s>',
+            ltrim($type->type->name, '\\'),
+            implode(
+                ',',
+                array_map(
+                    static fn(PhpDocParser\Ast\Type\TypeNode $subType) => $subType instanceof PhpDocParser\Ast\Type\IdentifierTypeNode
+                        ? ltrim($subType->name, '\\')
+                        : throw new RuntimeException("Generic subtype must by an identifier, got `" . get_debug_type($subType) . "` instead"),
+                    $type->genericTypes,
+                ),
+            ),
+        );
+    }
+
+    /**
+     * @param ReflectionClass<object> $reflector
+     * @param array<string, string> $genericTypesMap
+     * @throws Throwable
+     */
+    protected function convertClassLike(ReflectionClass $reflector, array $genericTypesMap, Definitions $definitions): JsonSchema\Schema
+    {
+        $docBlock = Factory::createInstance()->createFromReflector($reflector);
         if (!$reflector instanceof ReflectionEnum && $reflector->isEnum()) {
-            /**
-             * @phpstan-ignore-next-line
-             */
             $reflector = new ReflectionEnum($reflector->getName());
         }
 
         $schema = $reflector instanceof ReflectionEnum
             ? $this->convertEnum($reflector)
-            : $this->convertClass($reflector, $docBlock, $definitions);
+            : $this->convertClass($reflector, $docBlock, $genericTypesMap, $definitions);
 
         $this->applyTitleAndDescription($schema, rtrim("{$docBlock->getSummary()}\n\n{$docBlock->getDescription()}"));
 
-        if ($docBlock->hasTag('deprecated')) {
+        if ($docBlock->hasTag('@deprecated')) {
             $schema->offsetSet('deprecated', true);
         }
 
@@ -503,10 +549,10 @@ class Converter
 
     /**
      * @param ReflectionClass<object> $reflector
-     * @param ArrayObject<string, JsonSchema\Schema> $definitions
+     * @param array<string, string> $genericTypesMap
      * @throws Throwable
      */
-    protected function convertClass(ReflectionClass $reflector, Reflection\DocBlock $docBlock, ArrayObject $definitions): JsonSchema\Schema
+    protected function convertClass(ReflectionClass $reflector, Block $docBlock, array $genericTypesMap, Definitions $definitions): JsonSchema\Schema
     {
         $schema = $this->createSchema([
             'type' => 'object',
@@ -519,24 +565,37 @@ class Converter
 
         $nativeProperties = $reflector->getProperties(ReflectionProperty::IS_PUBLIC);
         foreach ($nativeProperties as $property) {
-            $schema->setProperty($property->getName(), $this->convertNativeProperty($property, $definitions));
+            $schema->setProperty($property->getName(), $this->convertNativeProperty($property, $genericTypesMap, $definitions));
             $schema->required[] = $property->getName();
         }
 
-        /** @var (Reflection\DocBlock\Tags\Property|Reflection\DocBlock\Tags\PropertyRead)[] $virtualProperties */
-        $virtualProperties = array_merge(
-            $docBlock->getTagsByName('property'),
-            $docBlock->getTagsByName('property-read'),
-            $docBlock->getTagsByName('property-write'),
-        );
-        foreach ($virtualProperties as $property) {
-            if (!($propertyName = trim($property->getVariableName() ?: ''))) {
-                throw new LogicException("Magic property in class `$reflector->name` must have a valid name");
+        /** @var list<array{props: list<PhpDocParser\Ast\PhpDoc\PropertyTagValueNode>, attrs: array<string, mixed>}> $virtualProperties */
+        $virtualProperties = [
+            [
+                'props' => $docBlock->getTags('@property'),
+                'attrs' => [],
+            ],
+            [
+                'props' => $docBlock->getTags('@property-read'),
+                'attrs' => ['readOnly' => true],
+            ],
+            [
+                'props' => $docBlock->getTags('@property-write'),
+                'attrs' => ['writeOnly' => true],
+            ],
+        ];
+        foreach ($virtualProperties as $propertySet) {
+            foreach ($propertySet['props'] as $property) {
+                $propertySchema = $this->convertVirtualType($property->type, $reflector->name, $propertySet['attrs'], $definitions, $genericTypesMap);
+                foreach ($propertySet['attrs'] as $key => $val) {
+                    $propertySchema->offsetSet($key, $val);
+                }
+                $this->applyTitleAndDescription($propertySchema, $property->description);
+                $schema->setProperty(substr($property->propertyName, 1), $propertySchema);
             }
-            $schema->setProperty($propertyName, $this->convertVirtualProperty($property, $reflector->name, $definitions));
         }
 
-        $schema->required = array_unique($schema->required);
+        $schema->required = array_unique($schema->required ?: []);
 
         return $schema;
     }
@@ -562,40 +621,18 @@ class Converter
     }
 
     /**
-     * @param class-string $declaringClass
-     * @param ArrayObject<string, JsonSchema\Schema> $definitions
+     * @param array<string, string> $genericTypesMap
      * @throws Throwable
      */
-    private function convertVirtualProperty(
-        Reflection\DocBlock\Tags\Property|Reflection\DocBlock\Tags\PropertyRead $property,
-        string                                                                  $declaringClass,
-        ArrayObject                                                             $definitions,
-    ): JsonSchema\Schema {
-        return $this->doConvertTag($property, $declaringClass, $definitions);
-    }
-
-    /**
-     * @param ArrayObject<string, JsonSchema\Schema> $definitions
-     * @throws Throwable
-     */
-    private function convertNativeProperty(ReflectionProperty $property, ArrayObject $definitions): JsonSchema\Schema
+    private function convertNativeProperty(ReflectionProperty $property, array $genericTypesMap, Definitions $definitions): JsonSchema\Schema
     {
-        $docBlock = Reflection\DocBlockFactory::createInstance()->create(trim($property->getDocComment() ?: '') ?: "/**\n*/");
+        $docBlock = Factory::createInstance()->createFromReflector($property);
 
-        $varTag = $docBlock->getTagsWithTypeByName('var')[0] ?? null;
-        if ($varTag) {
-            /**
-             * @see https://github.com/phpstan/phpstan/issues/11334
-             * @phpstan-ignore-next-line
-             */
-            $schema = $this->doConvertTag($varTag, $property->class, $definitions);
-        } else {
-            /**
-             * @see https://github.com/phpstan/phpstan/issues/11334
-             * @phpstan-ignore-next-line
-             */
-            $schema = $this->convertNativeType($property->getType(), $property->class, $definitions);
-        }
+        /** @var null|PhpDocParser\Ast\PhpDoc\VarTagValueNode $varTag */
+        $varTag = $docBlock->findTag('@var');
+        $schema = $varTag
+            ? $this->convertVirtualType($varTag->type, $property->class, [], $definitions, $genericTypesMap)
+            : $this->convertNativeType($property->getType(), $property->class, $definitions);
 
         if ($property->hasDefaultValue()) {
             $schema->default = $property->getDefaultValue();
@@ -605,13 +642,20 @@ class Converter
             $schema->description = $summary;
         }
 
-        if ($docBlock->hasTag('deprecated')) {
+        if ($docBlock->hasTag('@deprecated')) {
             $schema->offsetSet('deprecated', true);
         }
 
-        if ($docBlock->hasTag('readonly') || $property->isReadOnly()) {
+        if ($docBlock->hasTag('@readonly') || $property->isReadOnly()) {
             $schema->offsetSet('readOnly', true);
         }
+
+        return $schema;
+    }
+
+    private function makeSchemaNullable(JsonSchema\Schema $schema): JsonSchema\Schema
+    {
+        $schema->type = ['null', ...(is_string($schema->type) ? [$schema->type] : $schema->type)];
 
         return $schema;
     }

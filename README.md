@@ -22,11 +22,13 @@ _Consider using `--dev` if you intend to use this library during development onl
 ## 🚀 Usage
 
 The following code:
+
 ```php
+<?php
+
 namespace MyApp;
 
 // Define an example class to be featured in the json schema
-
 class Person
 {
     public function __construct(
@@ -37,15 +39,17 @@ class Person
 }
 
 // Load a PHPDoc block that should return an instance of the Person class
-$docblock = \phpDocumentor\Reflection\DocBlockFactory::createInstance()->create('/** @return Person */');
+$docblock = \uuf6429\PHPStanPHPDocTypeResolver\PhpDoc\Factory::createInstance()
+    ->createFromComment('/** @return Person */');
 
 // Retrieve the @return tag for that docblock.
-$returnTag = $docblock->getTagsWithTypeByName('return')[0];
+/** @var \PHPStan\PhpDocParser\Ast\PhpDoc\ReturnTagValueNode $returnTag */
+$returnTag = $docblock->getTag('@return');
 
 // Convert that @return tag to JSON Schema
 // (note that convertTag() takes typed tags, for example: @param, @var, @property[-read/-write] and of course @return)
 $converter = new \uuf6429\PHPDocToJSONSchema\Converter();
-$result = $converter->convertTag($returnTag, null);
+$result = $converter->convertType($returnTag->type, null);
 
 // Export the schema and print it out as json
 echo json_encode(\Swaggest\JsonSchema\Schema::export($result), JSON_PRETTY_PRINT);
@@ -80,17 +84,10 @@ See also [`ExampleTest`](https://github.com/uuf6429/phpdoc-to-jsonschema/blob/ma
 
 ## 📖 Documentation
 
-The `\uuf6429\PHPDocToJSONSchema\Converter` class exposes the following methods:
+The `\uuf6429\PHPDocToJSONSchema\Converter` class exposes the following:
 
 - ```php
-  convertTag(\phpDocumentor\Reflection\DocBlock\Tags\TagWithType $tag, ?string $currentClass): \Swaggest\JsonSchema\Schema
-  ```
-  Converts the PHPDoc Type of the passed `$tag` and returns its schema.
-  - `$tag` The tag whose type will be converted.
-  - `$currentClass` The fully-qualified class name of the class where this tag appeared, or null if wasn't a class (e.g. for functions).
-
-- ```php
-  convertType(\phpDocumentor\Reflection\Type $type, ?string $currentClass): \Swaggest\JsonSchema\Schema`
+  function convertType(\phpDocumentor\Reflection\Type $type, ?string $currentClass): \Swaggest\JsonSchema\Schema
   ```
   Converts the provided PHPDoc type and returns its schema.
     - `$type` The PHPDoc type to be converted.
