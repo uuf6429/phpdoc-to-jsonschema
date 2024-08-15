@@ -42,7 +42,10 @@ class ReadmeTest extends TestCase
         }
 
         foreach (array_chunk($matches['text'], 2) as $i => $chunk) {
-            yield "Example $i" => ['inputCode' => $chunk[0], 'expectedOutput' => $chunk[1]];
+            yield "Example $i" => [
+                'inputCode' => str_replace("\r\n", "\n", $chunk[0]),
+                'expectedOutput' => str_replace("\r\n", "\n", $chunk[1]),
+            ];
         }
     }
 }
