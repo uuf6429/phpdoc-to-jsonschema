@@ -1,6 +1,6 @@
 <?php
 
-namespace Unit;
+namespace uuf6429\PHPDocToJSONSchemaTests\Unit;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
