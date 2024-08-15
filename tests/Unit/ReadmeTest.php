@@ -33,11 +33,11 @@ class ReadmeTest extends TestCase
             self::fail('The README.md file could not be read: ' . str_replace('/', DIRECTORY_SEPARATOR, self::README_FILE));
         }
 
-        if (!preg_match('/\r?\n## 🚀 Usage\r?\n(.*)\r?\n## 📖 Documentation\r?\n/su', $readme, $matches)) {
+        if (!preg_match('/\R## 🚀 Usage\R(.*)\R## 📖 Documentation\R/su', $readme, $matches)) {
             self::fail('"Usage" section could not be parsed from README.md file');
         }
 
-        if (!preg_match_all('/\r?\n```(?<type>\w+)\r?\n(?<text>.+?)\r?\n```\r?\n/s', $matches[1], $matches)) {
+        if (!preg_match_all('/\R```(?<type>\w+)\R(?<text>.+?)\R```\R/s', $matches[1], $matches)) {
             self::fail('Examples could not be parsed from "Usage" section in README.md file');
         }
 
