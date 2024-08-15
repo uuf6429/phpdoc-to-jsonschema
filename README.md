@@ -40,7 +40,7 @@ class Person
 
 // Load a PHPDoc block that should return an instance of the Person class
 $docblock = \uuf6429\PHPStanPHPDocTypeResolver\PhpDoc\Factory::createInstance()
-    ->createFromComment('/** @return Person */');
+    ->createFromComment('/** @return \MyApp\Person */');
 
 // Retrieve the @return tag for that docblock.
 /** @var \PHPStan\PhpDocParser\Ast\PhpDoc\ReturnTagValueNode $returnTag */
@@ -57,10 +57,12 @@ echo json_encode(\Swaggest\JsonSchema\Schema::export($result), JSON_PRETTY_PRINT
 ...results in something like:
 ```json
 {
-    "$ref": "#\/definitions\/MyApp.Person",
     "definitions": {
         "MyApp.Person": {
-            "type": "object",
+            "required": [
+                "name",
+                "height"
+            ],
             "properties": {
                 "name": {
                     "type": "string",
@@ -71,12 +73,10 @@ echo json_encode(\Swaggest\JsonSchema\Schema::export($result), JSON_PRETTY_PRINT
                     "readOnly": true
                 }
             },
-            "required": [
-                "name",
-                "height"
-            ]
+            "type": "object"
         }
-    }
+    },
+    "$ref": "#\/definitions\/MyApp.Person"
 }
 ```
 
